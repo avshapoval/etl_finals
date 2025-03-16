@@ -186,6 +186,6 @@ graph TD
     docker compose up --build [-d]
     ```
 4. После сборки проекта и его развертывания будут доступны интерфейсы PostgreSQL, mongo-express, Airflow и Spark по указанным выше URL.
-5. Все что остается сделать вручную после окончания деплоя - включить (переевсти в `unpaused`) DAG в UI Airflow. Т.к. используется всего один executor (`SequentialExecutor`), включать необходимо в следующей последовательности:
+5. Все что остается сделать вручную после окончания деплоя - включить (переевсти в `unpaused`) DAG в UI Airflow. Т.к. используется `SequentialExecutor`, включать DAG-и необходимо последовательно:
     1. mongo_to_pg_full_replication
     2. cdm_materialized_views_refresh
