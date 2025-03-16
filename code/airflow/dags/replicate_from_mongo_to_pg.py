@@ -34,16 +34,16 @@ default_args = {
     'email_on_failure': False,
     'email_on_retry': False,
     'retries': 1,
-    'retry_delay': timedelta(minutes=5),
-    'catchup': False
+    'retry_delay': timedelta(minutes=5)
 }
 
 with DAG(
     'mongo_to_pg_full_replication',
     default_args=default_args,
     description='Полная репликация данных из MongoDB в PostgreSQL',
-    schedule_interval=timedelta(days=1),
-    max_active_runs=1
+    schedule_interval="@daily",
+    max_active_runs=1,
+    catchup=False
 ) as dag:
     
     start = EmptyOperator(task_id='start')

@@ -159,15 +159,15 @@ services:
   airflow-init:
     build: ./infra/airflow/init
     container_name: airflow-init
-    # depends_on:
-    #   postgresql:
-    #     condition: service_healthy
-    #   spark-master:
-    #     condition: service_healthy
-    #   mongodb:
-    #     condition: service_healthy
-    #   mongo-datagen:
-    #     condition: service_completed_successfully
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      spark-master:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      mongo-datagen:
+        condition: service_completed_successfully
     environment:
       <<: [*pg-connect, *airflow-common-env]
       MONGO_USER: ${MONGO_USER}

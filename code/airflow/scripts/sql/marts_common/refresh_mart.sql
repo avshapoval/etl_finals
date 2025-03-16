@@ -1,0 +1,1 @@
+REFRESH MATERIALIZED VIEW {{params.marts_schema}}.{{params.mat_view_name}}

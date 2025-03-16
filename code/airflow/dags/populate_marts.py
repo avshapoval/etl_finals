@@ -1,59 +1,72 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from airflow import DAG
-from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
+from airflow.utils.trigger_rule import TriggerRule
 from airflow.operators.empty import EmptyOperator
+from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator, BranchSQLOperator
 
-from airflow.providers.mysql.hooks.mysql import MySqlHook
 
-from scripts.helpers.airflow_common import get_pg_connection_uri
-
-# Константы
-ANALYTICAL_MARTS = ["user_activity", "product_sales", "average_check"]
-JARS = "/opt/airflow/spark/jars/mysql-connector-java-8.3.0.jar"
-PYSPARK_SCRIPT_PATH = '/opt/airflow/scripts/pyspark_scripts/populate_analytical_marts.py'
-
-# Параметры по умолчанию для DAG
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
-    'start_date': datetime(2024, 12, 30),
+    'start_date': datetime(2024, 1, 1),
     'email_on_failure': False,
-    'email_on_retry': False,
-    'retries': 0,
-    'retry_delay': timedelta(minutes=5),
-    'catchup': False
+    'retries': 1,
 }
 
+STG_PG_SCHEMA = "stg"
+MARTS_PG_SCHEMA = "cdm"
+MARTS_TABLE_DDL_FILE_MAPPING = {
+    "moderation_stats": "/sql/marts_ddl/moderation_stats.sql",
+    "product_price_dynamics": "/sql/marts_ddl/product_price_dynamics.sql",
+    "user_session_analysis": "/sql/marts_ddl/user_session_analysis.sql"
+}
+PG_CONN_ID = 'etl_finals_postgresql'
+FILEPATH_PREFIX = '/opt/airflow/scripts'
+
 with DAG(
-    'create_analytical_marts',
+    'cdm_materialized_views_refresh',
     default_args=default_args,
-    description='Создание витрин данных в MySQL через Spark',
-    schedule_interval=timedelta(days=1),
+    schedule_interval='@daily',
+    catchup=False,
+    tags=['cdm', 'materialized_views'],
+    template_searchpath=FILEPATH_PREFIX
 ) as dag:
-    # Креды и драйверы
-    src_tgt_url = get_pg_connection_uri(MySqlHook.get_connection('python_de_finals_mysql'))
-    src_tgt_driver = 'com.mysql.cj.jdbc.Driver'
 
-    # EmptyOperator для начала и конца DAG
     start = EmptyOperator(task_id='start')
-    finish = EmptyOperator(task_id='finish')
+    end = EmptyOperator(task_id='end')
 
-    for mart in ANALYTICAL_MARTS:
-        spark_submit_task = SparkSubmitOperator(
-            task_id=f'create_mart_{mart}',
-            application=PYSPARK_SCRIPT_PATH,
-            conn_id='python_de_finals_spark',
-            application_args=[
-                '--src_tgt_url', src_tgt_url,
-                '--src_tgt_driver', src_tgt_driver,
-                '--target_mart', mart
-            ],
-            conf={
-                "spark.driver.memory": "700m",
-                "spark.executor.memory": "700m"
-            },
-            jars=JARS
+    for mv_name, mv_ddl_filepath in MARTS_TABLE_DDL_FILE_MAPPING.items():
+
+        # Проверяем, есть ли mv. Если да - переходим к обновлению, если нет - сначала создаем.
+        check_task = BranchSQLOperator(
+            task_id=f'check_{mv_name}',
+            conn_id=PG_CONN_ID,
+            sql=f"sql/marts_common/check_mart_exists.sql",
+            params={"mat_view_name": mv_name, "marts_schema": MARTS_PG_SCHEMA},
+            follow_task_ids_if_true=f'refresh_{mv_name}',
+            follow_task_ids_if_false=f'create_{mv_name}'
         )
 
-        start >> spark_submit_task >> finish
+        # Создание mv
+        create_task = SQLExecuteQueryOperator(
+            task_id=f'create_{mv_name}',
+            sql=mv_ddl_filepath,
+            conn_id=PG_CONN_ID,
+            params={"mat_view_name": mv_name, "marts_schema": MARTS_PG_SCHEMA, "stg_schema": STG_PG_SCHEMA}
+        )
+
+        # Обновление mv
+        refresh_task = SQLExecuteQueryOperator(
+            task_id=f'refresh_{mv_name}',
+            sql=f"sql/marts_common/refresh_mart.sql",
+            conn_id=PG_CONN_ID,
+            params={"mat_view_name": mv_name, "marts_schema": MARTS_PG_SCHEMA},
+            trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS
+        )
+
+        # Оркестрация задач
+        start >> check_task
+        check_task >> [create_task, refresh_task]
+        create_task >> refresh_task
+        refresh_task >> end
