@@ -1,0 +1,230 @@
+name: etl-de-finals-avshapoval
+
+x-postgresql-connection-env: &pg-connect
+  POSTGRESQL_APP_HOST: ${POSTGRESQL_APP_HOST}
+  POSTGRESQL_APP_DB: ${POSTGRESQL_APP_DB}
+  POSTGRESQL_STG_SCHEMA: ${POSTGRESQL_STG_SCHEMA}
+  POSTGRESQL_MARTS_SCHEMA: ${POSTGRESQL_MARTS_SCHEMA}
+  POSTGRESQL_APP_USER: ${POSTGRESQL_APP_USER}
+  POSTGRESQL_APP_PASSWORD: ${POSTGRESQL_APP_PASSWORD}
+
+x-airflow-common-env: &airflow-common-env
+  AIRFLOW__CORE__LOAD_EXAMPLES: ${AIRFLOW__CORE__LOAD_EXAMPLES}
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW__DATABASE__SQL_ALCHEMY_CONN}
+  AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: ${AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK}
+  AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY}
+  AIRFLOW_UID: ${AIRFLOW_UID}
+  _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME}
+  _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD}
+  SPARK_MASTER_HOST: ${SPARK_MASTER_HOST}
+  SPARK_MASTER_PORT: ${SPARK_MASTER_PORT}
+
+x-spark-common-env: &spark-common-env
+  SPARK_RPC_AUTHENTICATION_ENABLED: ${SPARK_RPC_AUTHENTICATION_ENABLED}
+  SPARK_RPC_ENCRYPTION_ENABLED: ${SPARK_RPC_ENCRYPTION_ENABLED}
+  SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: ${SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED}
+  SPARK_SSL_ENABLED: ${SPARK_SSL_ENABLED}
+
+services:
+  # RDBMS
+  postgresql:
+    build: ./infra/db/postgresql
+    container_name: postgresql
+    environment:
+      <<: *pg-connect
+      POSTGRES_PASSWORD: ${POSTGRESQL_ROOT_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgresql-data:/var/lib/postgres/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
+  # MongoDB
+  mongodb:
+    build: ./infra/db/mongo/mongodb
+    container_name: mongo
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+      MONGO_USER: ${MONGO_USER}
+      MONGO_PASSWORD: ${MONGO_PASS}
+      MONGO_INITDB_DB: ${MONGO_DB}
+      MONGODB_ATLAS_TELEMETRY_ENABLE: 'false'
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # MongoDB UI
+  mongo-express:
+    image: mongo-express:1.0.2-20
+    container_name: mongo-express
+    environment:
+      ME_CONFIG_MONGODB_ENABLE_ADMIN: true
+      ME_CONFIG_MONGODB_ADMINUSERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      ME_CONFIG_MONGODB_ADMINPASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+      ME_CONFIG_BASICAUTH_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      ME_CONFIG_BASICAUTH_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+      ME_CONFIG_MONGODB_SERVER: mongo
+      ME_CONFIG_MONGODB_PORT: 27017
+    ports:
+      - "8082:8081"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+  # Spark
+  spark-master:
+    build: ./infra/spark/spark-master
+    container_name: spark-master
+    environment:
+      <<: *spark-common-env
+      SPARK_MODE: master
+      SPARK_MASTER_WEBUI_PORT: 8081
+    ports:
+      - "8081:8081"
+    volumes:
+      - spark-data:/bitnami
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8081"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+
+  spark-worker:
+    build: ./infra/spark/spark-worker
+    container_name: spark-worker
+    environment:
+      <<: *spark-common-env
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://${SPARK_MASTER_HOST}:${SPARK_MASTER_PORT}
+      SPARK_WORKER_MEMORY: 1G
+      SPARK_WORKER_CORES: 1
+    volumes:
+      - spark-data:/bitnami
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+
+  # Datagen
+  mongo-datagen:
+    build: ./infra/datagen/mongo_datagen
+    container_name: mongo-datagen
+    environment:
+      MONGO_HOST: mongo
+      MONGO_USER: ${MONGO_USER}
+      MONGO_PASSWORD: ${MONGO_PASS}
+      MONGO_INITDB_DB: ${MONGO_DB}
+      MONGO_DATAGEN_NUM_USER_SESSIONS: ${MONGO_DATAGEN_NUM_USER_SESSIONS}
+      MONGO_DATAGEN_NUM_EVENT_LOGS: ${MONGO_DATAGEN_NUM_EVENT_LOGS}
+      MONGO_DATAGEN_NUM_SUPPORT_TICKETS: ${MONGO_DATAGEN_NUM_SUPPORT_TICKETS}
+      MONGO_DATAGEN_NUM_MODERATION_QUEUES: ${MONGO_DATAGEN_NUM_MODERATION_QUEUES}
+      MONGO_DATAGEN_NUM_SEARCH_QUERIES: ${MONGO_DATAGEN_NUM_SEARCH_QUERIES}
+    volumes:
+      - ./code/datagen/mongo_datagen:/app/src
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
+  # Airflow
+  airflow-init:
+    build: ./infra/airflow/init
+    container_name: airflow-init
+    # depends_on:
+    #   postgresql:
+    #     condition: service_healthy
+    #   spark-master:
+    #     condition: service_healthy
+    #   mongodb:
+    #     condition: service_healthy
+    #   mongo-datagen:
+    #     condition: service_completed_successfully
+    environment:
+      <<: [*pg-connect, *airflow-common-env]
+      MONGO_USER: ${MONGO_USER}
+      MONGO_PASSWORD: ${MONGO_PASS}
+      MONGO_INITDB_DB: ${MONGO_DB}
+    volumes:
+      - ./code/airflow/dags:/opt/airflow/dags
+      - ./code/airflow/scripts:/opt/airflow/scripts
+      - sqlite-airflow-data:/usr/local/airflow/db:rw
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
+  airflow-scheduler:
+    build: ./infra/airflow/scheduler
+    container_name: airflow-scheduler
+    environment:
+      <<: *airflow-common-env
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./code/airflow/dags:/opt/airflow/dags
+      - ./code/airflow/scripts:/opt/airflow/scripts
+      - sqlite-airflow-data:/usr/local/airflow/db:rw
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+
+  airflow-webserver:
+    build: ./infra/airflow/webserver
+    container_name: airflow-webserver
+    environment:
+      <<: *airflow-common-env
+    ports:
+      - "8080:8080"
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./code/airflow/dags:/opt/airflow/dags
+      - ./code/airflow/scripts:/opt/airflow/scripts
+      - sqlite-airflow-data:/usr/local/airflow/db:rw
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+
+volumes:
+  postgresql-data:
+  sqlite-airflow-data:
+  spark-data:
+  mongodb-data:
